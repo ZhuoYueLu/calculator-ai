@@ -10,6 +10,7 @@ function App() {
   const [isNewInput, setIsNewInput] = useState(true); // 标记是否为新输入
   const [history, setHistory] = useState([]); // 历史记录
   const historyRef = useRef(null); // 历史记录区域的引用
+  const displayRef = useRef(null); // 输入框引用
   
   const [conversionType, setConversionType] = useState('length');
   const [fromUnit, setFromUnit] = useState('m');
@@ -17,59 +18,140 @@ function App() {
   const [value, setValue] = useState('');
   const [result, setResult] = useState('');
 
+  // 安全表达式求值：仅允许预定义的数学函数和运算符
+  const safeEvaluate = (expr) => {
+    // 预定义的数学函数映射
+    const safeFunctions = {
+      sin: angleMode === 'deg' ? (x) => Math.sin(Math.PI / 180 * x) : Math.sin,
+      cos: angleMode === 'deg' ? (x) => Math.cos(Math.PI / 180 * x) : Math.cos,
+      tan: angleMode === 'deg' ? (x) => Math.tan(Math.PI / 180 * x) : Math.tan,
+      log: Math.log10,
+      ln: Math.log,
+      sqrt: Math.sqrt,
+      cbrt: Math.cbrt,
+      abs: Math.abs,
+      factorial: (n) => {
+        if (n < 0 || !Number.isInteger(n)) return NaN;
+        if (n === 0 || n === 1) return 1;
+        let r = 1;
+        for (let i = 2; i <= n; i++) r *= i;
+        return r;
+      }
+    };
+
+    // 替换显示符号为计算符号
+    let expression = expr
+      .replace(/×/g, '*')
+      .replace(/÷/g, '/')
+      .replace(/π/g, `(${Math.PI})`)
+      .replace(/\be\b(?!\^)/g, `(${Math.E})`)  // 仅替换独立 e，不匹配 e^
+      .replace(/\^/g, '**');
+
+    // 预处理阶乘：将 n! 或 (...)! 转为 factorial(n)
+    expression = expression.replace(/(\d+|\([^()]*\))\s*!/g, (match, num) => {
+      return `factorial(${num})`;
+    });
+
+    // 安全检查
+    const sanitized = expression.replace(/[a-zA-Z]+/g, (token) => {
+      // 只允许预定义的函数名
+      if (token in safeFunctions) return token;
+      // 允许 Math.PI / Math.E（已替换为数字字面量，不会到这里）
+      throw new Error(`不允许的标识符: ${token}`);
+    });
+
+    // 构建安全执行上下文
+    const fn = new Function(...Object.keys(safeFunctions), `"use strict"; return (${sanitized})`);
+    return fn(...Object.values(safeFunctions));
+  };
+  
+  const insertAtCursor = (text) => {
+    const el = displayRef.current;
+    let start, end;
+    
+    if (el) {
+      start = el.selectionStart;
+      end = el.selectionEnd;
+    } else {
+      start = input.length;
+      end = input.length;
+    }
+    
+    const newValue = input.substring(0, start) + text + input.substring(end);
+    
+    setInput(newValue);
+    
+    // 定位光标到插入位置后面
+    setTimeout(() => {
+      const targetEl = displayRef.current;
+      if (targetEl) {
+        const newPos = start + text.length;
+        targetEl.focus();
+        targetEl.setSelectionRange(newPos, newPos);
+      }
+    }, 0);
+  };
+
   const handleClick = (val) => {
     // 清除按钮
     if (val === 'C') {
       setInput('');
-      setHistory([]); // 清空历史记录
+      setHistory([]);
       setIsNewInput(true);
       return;
     }
     
     // 退格按钮
     if (val === '⌫') {
-      if (isNewInput) {
-        setInput('');
+      const el = displayRef.current;
+      if (!el) {
+        setInput(prev => isNewInput ? '' : prev.slice(0, -1));
         setIsNewInput(false);
-      } else {
-        setInput(prev => prev.slice(0, -1));
+        return;
       }
+      
+      const start = el.selectionStart;
+      const end = el.selectionEnd;
+      
+      if (start === end && start > 0) {
+        // 光标位置退格
+        const newValue = input.substring(0, start - 1) + input.substring(start);
+        setInput(newValue);
+        setTimeout(() => {
+          el.setSelectionRange(start - 1, start - 1);
+        }, 0);
+      } else if (start !== end) {
+        // 选中区域退格
+        const newValue = input.substring(0, start) + input.substring(end);
+        setInput(newValue);
+        setTimeout(() => {
+          el.setSelectionRange(start, start);
+        }, 0);
+      }
+      
+      setIsNewInput(false);
       return;
     }
     
     // 等于按钮 - 计算结果
     if (val === '=') {
+      if (!input.trim()) return;
       try {
-        let expression = input
-          .replace(/×/g, '*')
-          .replace(/÷/g, '/')
-          .replace(/π/g, 'Math.PI')
-          .replace(/e/g, 'Math.E')
-          .replace(/sin\(/g, angleMode === 'deg' ? 'Math.sin(Math.PI/180*' : 'Math.sin(')
-          .replace(/cos\(/g, angleMode === 'deg' ? 'Math.cos(Math.PI/180*' : 'Math.cos(')
-          .replace(/tan\(/g, angleMode === 'deg' ? 'Math.tan(Math.PI/180*' : 'Math.tan(')
-          .replace(/log\(/g, 'Math.log10(')
-          .replace(/ln\(/g, 'Math.log(')
-          .replace(/sqrt\(/g, 'Math.sqrt(')
-          .replace(/cbrt\(/g, 'Math.cbrt(')
-          .replace(/abs\(/g, 'Math.abs(')
-          .replace(/(\d+)!/g, 'factorial($1)');
+        // 自动补全缺失的右括号
+        let expr = input;
+        let open = (expr.match(/\(/g) || []).length;
+        let close = (expr.match(/\)/g) || []).length;
+        while (close < open) {
+          expr += ')';
+          close++;
+        }
         
-        // 处理幂运算
-        expression = expression.replace(/\^/g, '**');
+        const result = safeEvaluate(expr);
+        const resultStr = Number.isFinite(result) ? String(Number(result.toFixed(10))) : 'Error';
         
-        const result = Function('return ' + expression)();
-        const resultStr = String(Number(result.toFixed(10)));
-        
-        // 添加到历史记录
-        setHistory(prev => {
-          const newHistory = [...prev, { expression: input, result: resultStr }];
-          // 只保留最近3条记录
-          return newHistory.slice(-3);
-        });
-        
+        setHistory(prev => [...prev, { expression: input, result: resultStr }].slice(-3));
         setInput(resultStr);
-        setIsNewInput(true); // 标记为刚完成计算，下次输入数字时清空
+        setIsNewInput(true);
       } catch {
         setInput('Error');
         setIsNewInput(true);
@@ -77,128 +159,159 @@ function App() {
       return;
     }
     
-    // 定义运算符列表
     const operators = ['+', '-', '*', '/', '^'];
     const isOperator = operators.includes(val);
+    const funcs = ['sin', 'cos', 'tan', 'log', 'ln', 'sqrt', 'cbrt', 'abs'];
+    const numbers = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', 'π', 'e'];
     
-    // 如果刚完成计算且输入的是数字，则清空屏幕
-    if (isNewInput && !isOperator) {
-      setInput(val);
+    // 科学函数按钮 - 优先级最高，无论是否 isNewInput 都处理
+    if (funcs.includes(val)) {
+      const el = displayRef.current;
+      let start = input.length; // 默认从末尾开始
+      if (el && !isNewInput) {
+        start = el.selectionStart;
+      }
+      
+      let textBefore = isNewInput ? '' : input.substring(0, start);
+      const lastChar = textBefore.slice(-1);
+      
+      let prefix = '';
+      if (numbers.includes(lastChar) || lastChar === ')' || lastChar === '!') {
+        prefix = '*';
+      }
+      
+      let newInput;
+      let cursorPos;
+      
+      if (isNewInput) {
+        newInput = prefix + val + '()';
+        cursorPos = (prefix + val + '(').length;
+      } else {
+        const beforePart = textBefore + prefix + val + '(';
+        const afterPart = ')' + input.substring(start);
+        newInput = beforePart + afterPart;
+        cursorPos = beforePart.length;
+      }
+      
+      setInput(newInput);
+      
+      setTimeout(() => {
+        const targetEl = displayRef.current;
+        if (targetEl) {
+          targetEl.focus();
+          targetEl.setSelectionRange(cursorPos, cursorPos);
+        }
+      }, 0);
+      
       setIsNewInput(false);
       return;
     }
     
-    // 如果刚完成计算且输入的是运算符，则继续使用当前结果
-    if (isNewInput && isOperator) {
+    // 刚完成计算的逻辑
+    if (isNewInput) {
+      if (!isOperator) {
+        setInput(val);
+        setTimeout(() => {
+          const el = displayRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(val.length, val.length);
+          }
+        }, 0);
+      } else {
+        // 运算符的话保持结果并添加运算符
+        setInput(prev => prev + val);
+        setTimeout(() => {
+          const el = displayRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(prev.length + 1, prev.length + 1);
+          }
+        }, 0);
+      }
       setIsNewInput(false);
-      setInput(prev => prev + val);
       return;
     }
     
-    // 处理科学函数按钮
-    if (['sin', 'cos', 'tan', 'log', 'ln', 'sqrt', 'cbrt', 'abs'].includes(val)) {
-      if (isNewInput) {
-        setInput(val + '(');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + val + '(');
-      }
-      return;
-    }
+    // 特殊按钮映射
+    const specialMap = {
+      'x²': '^2', 'x³': '^3', 'xʸ': '^',
+      'eˣ': 'e^', '10ˣ': '10^',
+      'n!': '!'
+    };
     
-    // 处理特殊按钮
-    if (val === 'x²') {
-      if (isNewInput) {
-        setInput('^2');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + '^2');
-      }
-      return;
-    }
-    
-    if (val === 'x³') {
-      if (isNewInput) {
-        setInput('^3');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + '^3');
-      }
-      return;
-    }
-    
-    if (val === 'xʸ') {
-      if (isNewInput) {
-        setInput('^');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + '^');
-      }
-      return;
-    }
-    
-    if (val === 'eˣ') {
-      if (isNewInput) {
-        setInput('e^');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + 'e^');
-      }
-      return;
-    }
-    
-    if (val === '10ˣ') {
-      if (isNewInput) {
-        setInput('10^');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + '10^');
-      }
+    if (val in specialMap) {
+      insertAtCursor(specialMap[val]);
       return;
     }
     
     if (val === '1/x') {
-      if (isNewInput) {
-        setInput('1/(' + input + ')');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => '1/(' + prev + ')');
-      }
+      setInput(prev => '1/(' + prev + ')');
       return;
     }
     
     if (val === '±') {
-      if (isNewInput) {
-        setInput(prev => {
-          if (prev.startsWith('-')) return prev.slice(1);
-          return '-' + prev;
-        });
+      const el = displayRef.current;
+      const start = el ? el.selectionStart : input.length;
+      const end = el ? el.selectionEnd : input.length;
+      
+      // 尝试在光标前的数字上加±
+      let leftPos = start - 1;
+      while (leftPos >= 0 && /[\d.πe]/.test(input[leftPos])) {
+        leftPos--;
+      }
+      leftPos++;
+      
+      if (leftPos < start) {
+        const before = input.substring(0, leftPos);
+        const num = input.substring(leftPos, start);
+        const after = input.substring(start);
+        
+        if (num.startsWith('-')) {
+          const newValue = before + num.substring(1) + after;
+          setInput(newValue);
+          setTimeout(() => {
+            const targetEl = displayRef.current;
+            if (targetEl) {
+              targetEl.focus();
+              targetEl.setSelectionRange(start - 1, start - 1);
+            }
+          }, 0);
+        } else {
+          const newValue = before + '-' + num + after;
+          setInput(newValue);
+          setTimeout(() => {
+            const targetEl = displayRef.current;
+            if (targetEl) {
+              targetEl.focus();
+              targetEl.setSelectionRange(start + 1, start + 1);
+            }
+          }, 0);
+        }
+        return;
+      }
+      
+      // 没有找到数字，就给整个表达式加
+      setInput(prev => prev.startsWith('-') ? prev.slice(1) : '-' + prev);
+      return;
+    }
+    
+    // 数字/右括号/常量后接左括号，自动补乘号
+    if (val === '(') {
+      const el = displayRef.current;
+      const start = el ? el.selectionStart : input.length;
+      const lastChar = input.substring(0, start).slice(-1);
+      
+      if (numbers.includes(lastChar) || lastChar === ')' || lastChar === '!') {
+        insertAtCursor('*(');
       } else {
-        setInput(prev => {
-          if (prev.startsWith('-')) return prev.slice(1);
-          return '-' + prev;
-        });
+        insertAtCursor('(');
       }
       return;
     }
     
-    if (val === 'n!') {
-      if (isNewInput) {
-        setInput(input + '!');
-        setIsNewInput(false);
-      } else {
-        setInput(prev => prev + '!');
-      }
-      return;
-    }
-    
-    // 默认情况：直接追加
-    if (isNewInput) {
-      setInput(val);
-      setIsNewInput(false);
-    } else {
-      setInput(prev => prev + val);
-    }
+    // 默认：在光标位置插入输入
+    insertAtCursor(val);
   };
 
   const buttons = [
@@ -308,16 +421,22 @@ function App() {
     setResult('');
   };
 
-  // 阶乘函数
-  const factorial = (n) => {
-    if (n < 0) return NaN;
-    if (n === 0 || n === 1) return 1;
-    let result = 1;
-    for (let i = 2; i <= n; i++) {
-      result *= i;
-    }
-    return result;
-  };
+  const basicGrid = (
+    <>
+      <div className="button-grid">
+        {buttons.map((btn) => (
+          <button
+            key={btn}
+            onClick={() => handleClick(btn)}
+            className={`btn ${['+', '-', '*', '/'].includes(btn) ? 'operator' : ''} ${btn === '⌫' ? 'backspace' : ''}`}
+          >
+            {btn}
+          </button>
+        ))}
+      </div>
+      <button onClick={() => handleClick('=')} className="equal-btn">=</button>
+    </>
+  );
 
   return (
     <div className="app-container">
@@ -389,59 +508,39 @@ function App() {
               </div>
             )}
             
-            <div className="display">{input || '0'}</div>
+            <input 
+              ref={displayRef}
+              className="display" 
+              value={input || '0'}
+              onChange={(e) => {
+                setInput(e.target.value);
+                setIsNewInput(false);
+              }}
+            />
             
-            {calcMode === 'scientific' ? (
-              <>
-                <div className="scientific-grid">
-                  {scientificButtons.map((row, rowIndex) => (
-                    <div key={rowIndex} className="sci-row">
-                      {row.map((btn) => (
-                        <button
-                          key={btn}
-                          onClick={() => handleClick(btn === '√' ? 'sqrt' : btn)}
-                          className={`sci-btn 
-                            ${['sin', 'cos', 'tan', 'log', 'ln'].includes(btn) ? 'func' : ''}
-                            ${['π', 'e'].includes(btn) ? 'constant' : ''}
-                            ${['x²', 'x³', 'xʸ', 'eˣ', '10ˣ'].some(x => btn.includes(x)) ? 'power' : ''}
-                            ${btn === 'C' ? 'clear' : ''}
-                          `}
-                        >
-                          {btn}
-                        </button>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-                <div className="button-grid">
-                  {buttons.map((btn) => (
-                    <button
-                      key={btn}
-                      onClick={() => handleClick(btn)}
-                      className={`btn ${['+', '-', '*', '/'].includes(btn) ? 'operator' : ''} ${btn === '⌫' ? 'backspace' : ''}`}
-                    >
-                      {btn}
-                    </button>
-                  ))}
-                </div>
-                <button onClick={() => handleClick('=')} className="equal-btn">=</button>
-              </>
-            ) : (
-              <>
-                <div className="button-grid">
-                  {buttons.map((btn) => (
-                    <button
-                      key={btn}
-                      onClick={() => handleClick(btn)}
-                      className={`btn ${['+', '-', '*', '/'].includes(btn) ? 'operator' : ''} ${btn === '⌫' ? 'backspace' : ''}`}
-                    >
-                      {btn}
-                    </button>
-                  ))}
-                </div>
-                <button onClick={() => handleClick('=')} className="equal-btn">=</button>
-              </>
+            {calcMode === 'scientific' && (
+              <div className="scientific-grid">
+                {scientificButtons.map((row, rowIndex) => (
+                  <div key={rowIndex} className="sci-row">
+                    {row.map((btn) => (
+                      <button
+                        key={btn}
+                        onClick={() => handleClick(btn === '√' ? 'sqrt' : btn)}
+                        className={`sci-btn 
+                          ${['sin', 'cos', 'tan', 'log', 'ln'].includes(btn) ? 'func' : ''}
+                          ${['π', 'e'].includes(btn) ? 'constant' : ''}
+                          ${['x²', 'x³', 'xʸ', 'eˣ', '10ˣ'].some(x => btn.includes(x)) ? 'power' : ''}
+                          ${btn === 'C' ? 'clear' : ''}
+                        `}
+                      >
+                        {btn}
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
             )}
+            {basicGrid}
           </div>
         ) : (
           <div className="converter-mode">
